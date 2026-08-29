@@ -14,7 +14,10 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Update with your Vercel URL
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -35,55 +38,140 @@ async def health_check():
 
 @app.post("/api/chat")
 async def chat(request: RequestObject):
-    config = {'configurable': {'thread_id': request.threadId}}
+
+    config = {
+        "configurable": {
+            "thread_id": request.threadId
+        }
+    }
+
     async def generate():
+
         try:
-            # Create a span for the entire request
             with langfuse.start_as_current_observation(
-                as_type="span", 
+                as_type="span",
                 name="chat-request",
-                input=request.prompt.content
+                input=request.prompt.content,
             ) as span:
-                # Set user_id as metadata
-                span.update(metadata={"user_id": request.threadId})
-                
-                # Create a nested generation for the LLM/agent call
+
+                span.update(
+                    metadata={
+                        "user_id": request.threadId
+                    }
+                )
+
                 with langfuse.start_as_current_observation(
                     as_type="generation",
                     name="agent-stream",
                     model="agentic-workflow",
-                    input=request.prompt.content
+                    input=request.prompt.content,
                 ) as generation:
-                    
+
                     full_response = ""
-                    for token, _ in agent.stream(
+
+                    messages = [
+                        SystemMessage(
+                            content=("""
+                                You are Market Insight, a professional financial market analysis agent.
+
+                            You have access to tools that provide stock prices, historical data,
+                            financial statements, company information, dividends, institutional
+                            holdings, insider transactions, analyst recommendations, stock news,
+                            and ticker resolution.
+
+                            IMPORTANT RULES:
+
+                            1. If the user asks about current, latest, today's, recent, real-time,
+                            or market-related information, you MUST use the appropriate tool.
+
+                            2. Never say that you do not have access to financial data when a
+                            relevant tool is available.
+
+                            3. If the user gives a company name but not a ticker, use the ticker
+                            resolution tool first.
+
+                            4. Use tool results as the source of truth for financial data.
+
+                            5. Never invent stock prices, financial figures, market movements,
+                            news, or other financial information.
+
+                            6. You may use your general knowledge only for conceptual questions
+                            where no tool is required.
+
+                            7. After receiving tool results, explain the result clearly and
+                            concisely to the user."""
+                            )
+                        ),
+                        HumanMessage(
+                            content=request.prompt.content
+                        ),
+                    ]
+
+                    for token, metadata in agent.stream(
                         {
-                            'messages': [
-                                SystemMessage(content="You are a professional stock market analyst. For every user query, first determine whether a relevant tool can provide accurate or real-time data. If an appropriate tool exists, you must use it before answering. If the user does not provide an exact stock ticker, use the available tool to identify or resolve the correct ticker when required. Only when no suitable tool applies should you respond using your own reasoning and general market knowledge. Never guess, assume, or fabricate any financial data."),
-                                HumanMessage(content=request.prompt.content)
-                            ]
+                            "messages": messages
                         },
-                        stream_mode='messages',
-                        config=config
+                        stream_mode="messages",
+                        config=config,
                     ):
-                        full_response += token.content
-                        yield token.content
-                    
-                    # Update generation with the complete output
-                    generation.update(output=full_response)
-                
-                # Update span with completion status
-                span.update(output="Request completed successfully")
-                
+
+                        # Ignore non-text/tool chunks
+                        if not hasattr(token, "content"):
+                            continue
+
+                        content = token.content
+
+                        if not content:
+                            continue
+
+                        # Some providers can return structured content
+                        if isinstance(content, list):
+                            text = ""
+
+                            for item in content:
+                                if isinstance(item, dict):
+                                    text += item.get("text", "")
+                                elif isinstance(item, str):
+                                    text += item
+
+                            content = text
+
+                        if not content:
+                            continue
+
+                        full_response += content
+
+                        yield content
+
+                    generation.update(
+                        output=full_response
+                    )
+
+                span.update(
+                    output="Request completed successfully"
+                )
+
         except Exception as e:
-            logger.error(f"Error in chat: {e}")
-            raise
-    
-    return StreamingResponse(generate(), media_type='text/event-stream',
+
+            logger.exception(
+                f"Error in chat: {e}"
+            )
+
+            # Send a readable error to the client
+            yield (
+                "\n\nSorry, something went wrong while "
+                "processing your request."
+            )
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/plain",
         headers={
-            'cache-control': 'no-cache, no-transform', 
-            'connection': 'keep-alive'
-        })
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 if __name__ == '__main__':
     logger.info("App Initiated Successfully")
