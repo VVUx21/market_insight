@@ -4,10 +4,11 @@ from fastapi import FastAPI
 from langfuse import Langfuse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessageChunk
 from config.config import RequestObject
 from MarketInsight.components.agent import agent
 from MarketInsight.utils.logger import get_logger
+from MarketInsight.utils import storage
 
 logger = get_logger(__name__)
 app = FastAPI()
@@ -17,6 +18,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -29,11 +32,23 @@ langfuse = Langfuse(
     host=os.getenv("LANGFUSE_HOST")
 )
 
+storage.init_db()
+
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint for service monitoring and keep-alive pings"""
     return {"status": "ok", "message": "Service is running"}
+
+
+@app.get("/api/threads")
+async def list_threads():
+    return storage.get_threads()
+
+
+@app.get("/api/threads/{thread_id}/messages")
+async def thread_messages(thread_id: str):
+    return storage.get_thread_messages(thread_id)
 
 
 @app.post("/api/chat")
@@ -44,6 +59,9 @@ async def chat(request: RequestObject):
             "thread_id": request.threadId
         }
     }
+
+    storage.ensure_thread(request.threadId, request.prompt.content[:50])
+    storage.save_message(request.threadId, "user", request.prompt.content)
 
     async def generate():
 
@@ -115,8 +133,8 @@ async def chat(request: RequestObject):
                         config=config,
                     ):
 
-                        # Ignore non-text/tool chunks
-                        if not hasattr(token, "content"):
+                        # Only stream the model's own output, not tool call/result chunks
+                        if not isinstance(token, AIMessageChunk):
                             continue
 
                         content = token.content
@@ -146,6 +164,8 @@ async def chat(request: RequestObject):
                     generation.update(
                         output=full_response
                     )
+
+                    storage.save_message(request.threadId, "assistant", full_response)
 
                 span.update(
                     output="Request completed successfully"
