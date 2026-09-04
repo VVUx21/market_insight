@@ -13,7 +13,8 @@
     "@crayonai/react-ui": "^0.9.7",
     "@thesysai/genui-sdk": "^0.7.7",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "react-markdown": "^9.0.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

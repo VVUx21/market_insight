@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
 import "./App.css";
 
 interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
+}
+
+interface ThreadSummary {
+  threadId: string;
+  title: string;
+  createdAt: string;
 }
 
 const RECOMMENDATIONS = [
@@ -38,6 +45,8 @@ function App() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [threads, setThreads] = useState<ThreadSummary[]>([]);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -59,6 +68,47 @@ function App() {
       behavior: "smooth",
     });
   }, [messages, loading]);
+
+  const loadThreads = useCallback(async () => {
+    try {
+      const res = await fetch("http://localhost:8000/api/threads");
+      const data: ThreadSummary[] = await res.json();
+      setThreads(data);
+    } catch (error) {
+      console.error("Failed to load threads:", error);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadThreads();
+  }, [loadThreads]);
+
+  const openThread = useCallback(
+    async (threadId: string) => {
+      try {
+        const res = await fetch(
+          `http://localhost:8000/api/threads/${threadId}/messages`
+        );
+        const data: { role: "user" | "assistant"; content: string }[] =
+          await res.json();
+
+        setMessages(
+          data.map((m) => ({
+            id: createId(),
+            role: m.role,
+            content: m.content,
+          }))
+        );
+
+        threadIdRef.current = threadId;
+        setActiveThreadId(threadId);
+        setSidebarOpen(false);
+      } catch (error) {
+        console.error("Failed to load thread:", error);
+      }
+    },
+    []
+  );
 
   // Auto resize textarea
   const resizeTextarea = () => {
@@ -85,67 +135,54 @@ function App() {
       setMessages((prev) => [...prev, userMessage]);
       setInput("");
       setLoading(true);
+      setActiveThreadId(threadIdRef.current);
 
       if (textareaRef.current) {
         textareaRef.current.style.height = "auto";
       }
 
       try {
-        const response = await fetch(
-          "http://localhost:8000/api/chat",
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-            prompt: {
-              content: text,
-              id: createId(),
-              role: "user",
-            },
+        const response = await fetch("http://localhost:8000/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: { content: text, id: createId(), role: "user" },
             threadId: threadIdRef.current,
             responseId: createId(),
           }),
-          }
-        );
+        });
 
-        if (!response.ok) {
-        const errorText = await response.text();
+        if (!response.ok || !response.body) {
+          const errorText = await response.text().catch(() => "");
+          console.error("Backend error:", response.status, errorText);
+          throw new Error(
+            `Backend returned ${response.status}: ${errorText}`
+          );
+        }
 
-        console.error(
-          "Backend error:",
-          response.status,
-          errorText
-        );
+        const assistantId = createId();
+        setMessages((prev) => [
+          ...prev,
+          { id: assistantId, role: "assistant", content: "" },
+        ]);
 
-        throw new Error(
-          `Backend returned ${response.status}: ${errorText}`
-        );
-      }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
 
-        const data = await response.json();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        /*
-         * Supports a few common backend response formats.
-         */
-        const assistantText =
-          data.response ??
-          data.message ??
-          data.output ??
-          data.content ??
-          "I couldn't generate a response.";
+          const chunk = decoder.decode(value, { stream: true });
 
-        const assistantMessage: Message = {
-          id: createId(),
-          role: "assistant",
-          content:
-            typeof assistantText === "string"
-              ? assistantText
-              : JSON.stringify(assistantText),
-        };
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, content: m.content + chunk } : m
+            )
+          );
+        }
 
-        setMessages((prev) => [...prev, assistantMessage]);
+        await loadThreads();
       } catch (error) {
         console.error("Chat error:", error);
 
@@ -166,7 +203,7 @@ function App() {
         }, 50);
       }
     },
-    [input, loading]
+    [input, loading, loadThreads]
   );
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -195,6 +232,7 @@ function App() {
       .toString(36)
       .substring(2, 8)}`;
 
+    setActiveThreadId(null);
     setInput("");
     setSidebarOpen(false);
 
@@ -260,16 +298,32 @@ function App() {
 
         <div className="sidebar-divider" />
 
-        <div className="sidebar-info">
-          <div className="info-title">
-            Market Insight AI
-          </div>
+        <div className="sidebar-threads">
+          {threads.length === 0 ? (
+            <div className="sidebar-info">
+              <div className="info-title">
+                Market Insight AI
+              </div>
 
-          <p>
-            Your intelligent assistant for Indian
-            financial markets, stocks and investment
-            research.
-          </p>
+              <p>
+                Your intelligent assistant for Indian
+                financial markets, stocks and investment
+                research.
+              </p>
+            </div>
+          ) : (
+            threads.map((t) => (
+              <button
+                key={t.threadId}
+                className={`thread-item ${
+                  t.threadId === activeThreadId ? "thread-active" : ""
+                }`}
+                onClick={() => openThread(t.threadId)}
+              >
+                {t.title}
+              </button>
+            ))
+          )}
         </div>
 
         <div className="sidebar-footer">
@@ -397,7 +451,7 @@ function App() {
                     </div>
 
                     <div className="message-content">
-                      {message.content}
+                      <ReactMarkdown>{message.content}</ReactMarkdown>
                     </div>
                   </div>
 
